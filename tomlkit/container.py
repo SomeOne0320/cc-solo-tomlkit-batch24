@@ -1151,6 +1151,11 @@ class OutOfOrderTableProxy(_CustomDict):  # type: ignore[type-arg]
         self._internal_container = Container(True)
         self._tables: list[Table] = []
         self._tables_map: dict[Key, list[int]] = {}
+        # one accumulating AoT per split array-of-tables key: each later
+        # fragment appends its elements to the AoT already assembled, instead
+        # of rebuilding the whole prefix (which was quadratic in the number
+        # of fragments)
+        self._merged_aots: dict[Key, AoT] = {}
 
         for i in indices:
             _, _item = self._container._body[i]
@@ -1170,6 +1175,11 @@ class OutOfOrderTableProxy(_CustomDict):  # type: ignore[type-arg]
                     if k is not None:
                         dict.__setitem__(self, k.key, v)
 
+        # The accumulating AoTs are extended in place, so refresh the internal
+        # container's dict views once (not O(size) on every fragment).
+        for key, aot in self._merged_aots.items():
+            dict.__setitem__(self._internal_container, key.key, aot.value)
+
         self._internal_container._validate_out_of_order_table()
 
     def _merge_aot_fragment(self, key: Key | None, item: Item) -> AoT | None:
@@ -1179,9 +1189,11 @@ class OutOfOrderTableProxy(_CustomDict):  # type: ignore[type-arg]
         An AoT whose elements are split across out-of-order parts of the same
         table arrives here once per part; ``_raw_append`` only knows how to
         chain duplicate ``Table`` parts and would raise ``KeyAlreadyPresent``.
-        The fragments are presented as a new merged ``AoT`` referencing the
+        The fragments are presented as a single merged ``AoT`` referencing the
         live element tables, without mutating either fragment (the parts keep
-        rendering their own elements).
+        rendering their own elements). The merged ``AoT`` is assembled once and
+        later fragments are appended to it, so each element is assembled a
+        bounded number of times regardless of how many parts there are.
 
         Returns the merged ``AoT``, or ``None`` if this is not such a fragment.
         """
@@ -1200,9 +1212,17 @@ class OutOfOrderTableProxy(_CustomDict):  # type: ignore[type-arg]
         if not isinstance(existing, AoT):
             return None
 
-        merged = AoT([*existing.body, *item.body], parsed=True)
-        internal._body[idx] = (internal._body[idx][0], merged)
-        dict.__setitem__(internal, key.key, merged.value)
+        merged = self._merged_aots.get(key)
+        if merged is None or merged is not existing:
+            # First merge for this key (or the accumulated AoT was replaced):
+            # copy the already-collected element references into one AoT that
+            # later fragments extend in place.
+            merged = AoT(list(existing.body), parsed=True)
+            self._merged_aots[key] = merged
+            internal._body[idx] = (internal._body[idx][0], merged)
+        for table in item.body:
+            merged.append(table)
+
         return merged
 
     def unwrap(self) -> dict[str, Any]:

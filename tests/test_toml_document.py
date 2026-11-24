@@ -871,6 +871,64 @@ z = 3
     assert hooks["state"]["z"] == 3
 
 
+def test_out_of_order_aot_fragments_assemble_each_element_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading a group split into many out-of-order fragments must not rebuild
+    the already-merged prefix per fragment (quadratic). Each merged AoT is
+    assembled once and later fragments are appended to it, so the number of
+    AoT constructions while reading stays bounded, not proportional to the
+    number of fragments (GH #505)."""
+    from tomlkit.items import AoT
+
+    parts = []
+    for i in range(60):
+        parts.append(f"[other{i}]\nx = {i}\n")
+        parts.append(f'[[group.tasks]]\nname = "task{i}"\n')
+        parts.append(f'[[group.hooks]]\nhook = "hook{i}"\n')
+        parts.append(f"[group.state{i}]\ny = {i}\n")
+    content = "\n".join(parts)
+
+    doc = parse(content)
+
+    constructed = 0
+    original_init = AoT.__init__
+
+    def counting_init(self: AoT, *args: Any, **kwargs: Any) -> None:
+        nonlocal constructed
+        constructed += 1
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(AoT, "__init__", counting_init)
+
+    group = doc["group"]
+    tasks = group["tasks"]
+    hooks = group["hooks"]
+
+    # One merged AoT per split key, however many fragments it is split into.
+    assert constructed == 2
+    assert [t["name"] for t in tasks] == [f"task{i}" for i in range(60)]
+    assert [h["hook"] for h in hooks] == [f"hook{i}" for i in range(60)]
+    assert group["state30"]["y"] == 30
+
+    # Reading keeps the original text intact.
+    assert doc.as_string() == content
+
+    # Mutating a late element writes back to that element's own position.
+    tasks[57]["name"] = "patched"
+    hooks[42]["hook"] = "patched-hook"
+    output = doc.as_string()
+    assert 'name = "patched"' in output
+    assert 'hook = "patched-hook"' in output
+    assert 'name = "task56"' in output
+    assert 'name = "task58"' in output
+
+    reparsed = parse(output)
+    assert reparsed["group"]["tasks"][57]["name"] == "patched"
+    assert reparsed["group"]["hooks"][42]["hook"] == "patched-hook"
+    assert reparsed.as_string() == output
+
+
 @pytest.mark.parametrize("value", [4, "text", [1, 2], {"nested": 3}])
 @pytest.mark.parametrize("operation", ["delete", "pop"])
 def test_out_of_order_proxy_can_remove_new_key(value: Any, operation: str) -> None:
