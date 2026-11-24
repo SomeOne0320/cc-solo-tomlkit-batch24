@@ -10,6 +10,7 @@ from typing import Callable
 from tomlkit._compat import decode
 from tomlkit._utils import RFC_3339_LOOSE
 from tomlkit._utils import _escaped
+from tomlkit._utils import detect_linesep
 from tomlkit._utils import parse_rfc3339
 from tomlkit.container import Container
 from tomlkit.exceptions import EmptyKeyError
@@ -101,8 +102,11 @@ class Parser:
     MAX_NESTING_DEPTH = 100
 
     def __init__(self, string: str | bytes) -> None:
+        # Decoded input kept around so the document can remember the line
+        # ending convention of the original text after parsing is done.
+        self._string = decode(string)
         # Input to parse
-        self._src = Source(decode(string))
+        self._src = Source(self._string)
 
         self._aot_stack: list[Key] = []
         self._nesting_depth = 0
@@ -174,6 +178,10 @@ class Parser:
 
     def parse(self) -> TOMLDocument:
         body = TOMLDocument(True)
+        # Remember the line ending convention of the source. New documents and
+        # files without line endings keep the library default (None); mixed
+        # line endings are also left alone so every parsed line is preserved.
+        body._linesep = detect_linesep(self._string)
 
         # Take all keyvals outside of tables/AoT's.
         while not self.end():

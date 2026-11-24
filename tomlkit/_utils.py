@@ -167,3 +167,57 @@ def merge_dicts(d1: dict[str, Any], d2: dict[str, Any]) -> None:
             d1[k].extend(v)
         else:
             d1[k] = d2[k]
+
+
+# A line feed that does not belong to a CRLF pair, i.e. a bare LF line ending.
+_BARE_LF = re.compile(r"(?<!\r)\n")
+
+
+def detect_linesep(content: str) -> str | None:
+    """Return the line ending convention of ``content``.
+
+    The result is ``"\\r\\n"`` when every line ending is CRLF, ``"\\n"`` when
+    they are all bare LF, and ``None`` for mixed line endings or content that
+    contains no line endings at all (a single-line file or a new document).
+    Counting the raw source -- including newlines inside multiline strings --
+    matches how the text was stored on disk.
+    """
+    num_newline = content.count("\n")
+    if num_newline == 0:
+        return None
+
+    num_crlf = content.count("\r\n")
+    if num_crlf == num_newline:
+        return "\r\n"
+    if num_crlf == 0:
+        return "\n"
+    return None
+
+
+def strip_linesep(text: str) -> str:
+    """Remove structural line endings (CRLF or bare LF) from ``text``.
+
+    Inline tables render on one line, so trivia trails that carry a line
+    ending in the source have it dropped on rendering -- including the CR of a
+    CRLF pair, which a plain ``replace("\\n", "")`` would leave behind.
+    """
+    return text.replace("\r\n", "").replace("\n", "")
+
+
+def to_linesep(text: str, linesep: str) -> str:
+    """Apply a line ending convention to structural text (trivia/whitespace).
+
+    Only bare line feeds are rewritten; existing CRLF pairs are left untouched,
+    so the call is idempotent and never produces ``\\r\\r\\n``. This must not
+    be used on string literals, whose newlines -- including those inside
+    multiline strings -- are part of the value and have to be preserved.
+    """
+    if linesep == "\r\n":
+        if "\n" not in text:
+            return text
+        return _BARE_LF.sub("\r\n", text)
+    if linesep == "\n":
+        if "\r" not in text:
+            return text
+        return text.replace("\r\n", "\n")
+    return text

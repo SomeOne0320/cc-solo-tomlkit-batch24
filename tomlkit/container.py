@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from typing import Self
 
 from tomlkit._compat import decode
+from tomlkit._linesep import nl
 from tomlkit._types import _CustomDict
 from tomlkit._utils import merge_dicts
 from tomlkit.exceptions import InvalidStringError
@@ -98,7 +99,7 @@ def _render_empty_aot(key: str, aot: AoT) -> str:
         f" = []"
         f"{aot.trivia.comment_ws}"
         f"{decode(aot.trivia.comment)}"
-        f"{aot.trivia.trail or chr(10)}"
+        f"{aot.trivia.trail or nl()}"
     )
 
 
@@ -678,7 +679,7 @@ class Container(_CustomDict):  # type: ignore[type-arg]
                         and not s.strip(" ").endswith("\n")
                         and "\n" not in v.trivia.indent
                     ):
-                        s += "\n"
+                        s += nl()
                     s += self._render_table(k, v)
                 elif isinstance(v, AoT):
                     if (
@@ -686,7 +687,7 @@ class Container(_CustomDict):  # type: ignore[type-arg]
                         and not s.strip(" ").endswith("\n")
                         and "\n" not in v.trivia.indent
                     ):
-                        s += "\n"
+                        s += nl()
                     s += self._render_aot(k, v)
                 else:
                     s += self._render_simple_item(k, v)
@@ -713,7 +714,7 @@ class Container(_CustomDict):  # type: ignore[type-arg]
                 open_, close = "[[", "]]"
 
             newline_in_table_trivia = (
-                "\n" if "\n" not in table.trivia.trail and len(table.value) > 0 else ""
+                nl() if "\n" not in table.trivia.trail and len(table.value) > 0 else ""
             )
             cur += (
                 f"{table.trivia.indent}"
@@ -742,7 +743,7 @@ class Container(_CustomDict):  # type: ignore[type-arg]
                     and not cur.strip(" ").endswith("\n")
                     and "\n" not in v.trivia.indent
                 ):
-                    cur += "\n"
+                    cur += nl()
                 assert k is not None
                 if v.is_super_table():
                     if k.is_dotted() and not key.is_dotted():
@@ -758,7 +759,7 @@ class Container(_CustomDict):  # type: ignore[type-arg]
                     and not cur.strip(" ").endswith("\n")
                     and "\n" not in v.trivia.indent
                 ):
-                    cur += "\n"
+                    cur += nl()
                 assert k is not None
                 cur += self._render_aot(k, v, prefix=_key)
             else:

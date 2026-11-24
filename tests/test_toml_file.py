@@ -3,6 +3,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
+from tomlkit import dumps
 from tomlkit.toml_document import TOMLDocument
 from tomlkit.toml_file import TOMLFile
 
@@ -96,18 +97,38 @@ def test_consistent_eol_2(tmp_path: Path) -> None:
         assert fh.read() == b"a = 1\nb = 2\nc = 3\n"
 
 
-def test_default_eol_is_os_linesep(tmp_path: Path) -> None:
+def test_new_documents_keep_the_library_default_linesep(tmp_path: Path) -> None:
     toml_path = tmp_path / "pyproject.toml"
     toml_f = TOMLFile(toml_path)
     content = TOMLDocument()
     content.append("a", 1)
-    content["a"].trivia.trail = "\n"
     content.append("b", 2)
-    content["b"].trivia.trail = "\r\n"
     toml_f.write(content)
-    linesep = os.linesep.encode()
+
+    # A document that was not parsed from a file carries no line ending
+    # convention, so the library default ("\n") is used and nothing is
+    # rewritten through an os.linesep-dependent state on the file object.
     with open(toml_path, "rb") as fh:
-        assert fh.read() == b"a = 1" + linesep + b"b = 2" + linesep
+        assert fh.read() == b"a = 1\nb = 2\n"
+
+
+def test_toml_file_does_not_carry_linesep_between_files(tmp_path: Path) -> None:
+    crlf_path = tmp_path / "windows.toml"
+    lf_path = tmp_path / "unix.toml"
+    crlf_path.write_bytes(b"a = 1\r\n")
+    lf_path.write_bytes(b"b = 2\n")
+
+    toml_f = TOMLFile(crlf_path)
+    crlf_doc = toml_f.read()
+    assert crlf_doc.linesep == "\r\n"
+
+    # The same file object then reads another file: the first file's CRLF
+    # convention must not leak onto the second document or its output.
+    toml_f._path = lf_path
+    lf_doc = toml_f.read()
+    assert lf_doc.linesep == "\n"
+    assert dumps(lf_doc) == "b = 2\n"
+    assert dumps(crlf_doc) == "a = 1\r\n"
 
 
 def test_readwrite_eol_windows(tmp_path: Path) -> None:

@@ -1,5 +1,4 @@
 import os
-import re
 
 from typing import TYPE_CHECKING
 
@@ -19,41 +18,27 @@ class TOMLFile:
     """
     Represents a TOML file.
 
+    Line endings are handled by the parsed document itself: an all-CRLF or
+    all-LF file keeps its convention (including for newly added lines), mixed
+    line endings are preserved line by line, and new documents or files
+    without line endings keep the library default. Reusing a ``TOMLFile`` to
+    read several files therefore cannot let one file's format affect another.
+
     :param path: path to the TOML file
     """
 
     def __init__(self, path: _StrPath) -> None:
         self._path = path
-        self._linesep: str = os.linesep
 
     def read(self) -> TOMLDocument:
         """Read the file content as a :class:`tomlkit.toml_document.TOMLDocument`."""
         with open(self._path, encoding="utf-8", newline="") as f:
-            content = f.read()
-
-            # check if consistent line endings
-            num_newline = content.count("\n")
-            if num_newline > 0:
-                num_win_eol = content.count("\r\n")
-                if num_win_eol == num_newline:
-                    self._linesep = "\r\n"
-                    content = content.replace("\r\n", "\n")
-                elif num_win_eol == 0:
-                    self._linesep = "\n"
-                else:
-                    self._linesep = "mixed"
-
-            return loads(content)
+            # newline="" keeps every line ending verbatim; the parser and the
+            # document remember the convention instead of normalizing the
+            # source (which would also rewrite multiline string contents).
+            return loads(f.read())
 
     def write(self, data: TOMLDocument) -> None:
         """Write the TOMLDocument to the file."""
-        content = data.as_string()
-
-        # apply linesep
-        if self._linesep == "\n":
-            content = content.replace("\r\n", "\n")
-        elif self._linesep == "\r\n":
-            content = re.sub(r"(?<!\r)\n", "\r\n", content)
-
         with open(self._path, "w", encoding="utf-8", newline="") as f:
-            f.write(content)
+            f.write(data.as_string())

@@ -7,6 +7,7 @@
 - Speed up looking up and replacing keys in tables: string lookups no longer build a temporary key, and replacing an existing value no longer scans every key in the table, which made updating many keys of a large table quadratic.
 - Speed up repeated array appends by keeping existing indexes instead of rebuilding them.
 - Speed up creating string values and keys, e.g. when building a document from Python data and dumping it: strings are escaped in one pass instead of per character, and the escape and bare-key character sets are built once.
+- Line ending handling moved from `TOMLFile` into the parsed document. Documents obtained from the same source via `TOMLFile.read()`, `load()` or `parse()`/`loads()` now follow the same rules when rendered to a file, a stream or a string: an all-CRLF or all-LF source keeps its convention, also for newly added lines; a source with mixed line endings keeps every existing line and only new lines use the library default (`"\n"`). Newline characters inside multiline strings are part of the value and are never rewritten. `TOMLFile` no longer keeps a mutable line-ending state, so reusing one to read several files cannot let one file's convention affect another. New documents and files without line endings keep the library default.
 
 ### Fixed
 

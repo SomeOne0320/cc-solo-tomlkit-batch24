@@ -26,12 +26,14 @@ from typing import overload
 
 from tomlkit._compat import PY38
 from tomlkit._compat import decode
+from tomlkit._linesep import nl
 from tomlkit._types import _CustomDict
 from tomlkit._types import _CustomFloat
 from tomlkit._types import _CustomInt
 from tomlkit._types import _CustomList
 from tomlkit._utils import CONTROL_CHARS
 from tomlkit._utils import escape_string
+from tomlkit._utils import strip_linesep
 from tomlkit._utils import validate_comment
 from tomlkit.exceptions import ConvertError
 from tomlkit.exceptions import InvalidStringError
@@ -1572,17 +1574,17 @@ class Array(Item, _CustomList):  # type: ignore[type-arg]
                 # A trailing comment (e.g. from add_line(comment=...)) carries
                 # no newline, so keep the closing bracket off the comment line
                 # to produce parseable output (GH #580).
-                inner += "\n" + self.trivia.indent
+                inner += nl() + self.trivia.indent
             return f"[{inner}]"
 
-        s = "[\n"
+        s = f"[{nl()}"
         s += "".join(
             self.trivia.indent
             + " " * 4
             + v.value.as_string()
             + ("," if not isinstance(v.value, Null) else "")
             + (v.comment.as_string() if v.comment is not None else "")
-            + "\n"
+            + nl()
             for v in self._value
             if v.value is not None
         )
@@ -2263,7 +2265,7 @@ class InlineTable(AbstractTable):
                 buf = f"{buf[:last_value_end]}{separator}{buf[last_value_end:]}"
                 needs_separator = False
 
-            v_trivia_trail = v.trivia.trail.replace("\n", "")
+            v_trivia_trail = strip_linesep(v.trivia.trail)
             if k.is_dotted() and isinstance(v, Table):
                 # A table materialized from a dotted key renders one
                 # `prefix.child = value` pair per child, so that keys added
@@ -2308,7 +2310,7 @@ class InlineTable(AbstractTable):
             if isinstance(v, Table):
                 parts.extend(f"{prefix}{sub}" for sub in self._render_dotted(k, v))
             else:
-                trail = v.trivia.trail.replace("\n", "")
+                trail = strip_linesep(v.trivia.trail)
                 parts.append(
                     f"{prefix}{v.trivia.indent}{k.as_string()}{k.sep}{v.as_string()}"
                     f"{v.trivia.comment_ws}{v.trivia.comment}{trail}"
