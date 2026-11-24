@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `rename_keys()` to `TOMLDocument`, `Table` and `InlineTable` (and the containers behind them) to rename several keys of one level in a single step. A swap such as `{"a": "b", "b": "a"}` and longer chains apply to the original values; a dot in a name is an ordinary character. A table split across the document (e.g. dotted keys at the top and a section header further down) is renamed in every place it appears, header included, keeping values, comments, whitespace and order. If any old name is missing, a destination is occupied by a key that stays put, or two keys are renamed to the same name, nothing is changed and the call raises.
+
 ### Changed
 
 - Speed up looking up and replacing keys in tables: string lookups no longer build a temporary key, and replacing an existing value no longer scans every key in the table, which made updating many keys of a large table quadratic.

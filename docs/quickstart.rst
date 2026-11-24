@@ -67,6 +67,46 @@ TOML Kit provides an intuitive API to modify TOML documents::
     >>> doc.pop("table2")
     # del doc["table2] is also possible
 
+Renaming keys
+~~~~~~~~~~~~~
+
+Use ``rename_keys()`` to rename several keys of one level at once. Names are
+literal, so a dot in a name is an ordinary character rather than a path
+separator, and the whole mapping is applied together: swaps and longer chains
+see the original values::
+
+    >>> doc = parse("""\
+    ... name = "app"
+    ... app.host = "localhost"
+    ... app.port = 8080
+    ... [other]
+    ... x = 1
+    ... [app.db]
+    ... name = "main"
+    ... """)
+    >>> _ = doc.rename_keys({"name": "title", "app": "service"})
+    >>> print(dumps(doc), end="")
+    title = "app"
+    service.host = "localhost"
+    service.port = 8080
+    [other]
+    x = 1
+    [service.db]
+    name = "main"
+
+A table defined in several places -- dotted keys at the top, a section header
+further down -- is renamed in all of them, headers included, while its values,
+comments, whitespace and position in the document stay the same.
+
+The call is atomic: if an old name is missing, a destination is occupied by a
+key that is not being renamed, or two keys are renamed to the same name,
+nothing is changed and an error is raised::
+
+    >>> doc.rename_keys({"missing": "other"})
+    Traceback (most recent call last):
+        ...
+    tomlkit.exceptions.NonExistentKey: 'Key "missing" does not exist.'
+
 Boolean comments
 ~~~~~~~~~~~~~~~~
 

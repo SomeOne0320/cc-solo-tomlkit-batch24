@@ -4,6 +4,7 @@ import copy
 import math
 
 from collections.abc import Iterator
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from typing import Any
 
@@ -29,6 +30,8 @@ from tomlkit.items import StringType
 from tomlkit.items import Table
 from tomlkit.items import Trivia
 from tomlkit.items import Whitespace
+from tomlkit.items import _rename_value_display_names
+from tomlkit.items import _renamed_key
 from tomlkit.items import item as _item
 
 
@@ -588,6 +591,112 @@ class Container(_CustomDict):  # type: ignore[type-arg]
         dict.__delitem__(self, key.key)
 
         return self
+
+    def rename_keys(self, mapping: Mapping[str, str]) -> Container:
+        """Rename keys of the current level in one atomic step.
+
+        ``mapping`` maps an old key name to its new name. Both names are
+        literal: a dot in either one is an ordinary character, not a path
+        separator. The whole mapping is applied at once, so swaps
+        (``{"a": "b", "b": "a"}``) and longer chains see the original values;
+        a destination only has to be free once the renamed keys themselves are
+        gone, so renaming ``a`` to ``b`` while ``b`` moves to ``c`` is fine.
+
+        Every occurrence of a renamed key is updated -- a table split across
+        several places (dotted keys at the top, a section header further
+        down) has all of its fragments and headers renamed together. The
+        values, comments, whitespace and document order are kept.
+
+        If any old name is missing, a destination is occupied by a key that is
+        not itself being renamed, or the same destination is used twice, no
+        change is made at all.
+
+        :Example:
+
+        >>> doc = parse("[a]\\nx = 1\\n[b]\\ny = 2\\n")
+        >>> doc.rename_keys({"a": "b", "b": "a"})
+        >>> doc.unwrap()
+        {'b': {'x': 1}, 'a': {'y': 2}}
+        """
+        raw: Mapping[Any, Any] = mapping
+        renames: dict[str, str] = {}
+        for old, new in raw.items():
+            if not isinstance(old, str) or not isinstance(new, str):
+                raise TypeError("rename_keys() expects a mapping of str to str")
+            renames[old] = new
+
+        changed = {old: new for old, new in renames.items() if old != new}
+        if not changed:
+            return self
+
+        return self._rename_changed(changed)
+
+    def _rename_changed(self, changed: dict[str, str]) -> Container:
+        # Validate everything before mutating, so a failure leaves the
+        # container untouched.
+        plans = _rename_plan(self, changed)
+        plans.sort(
+            key=lambda plan: plan[3][0] if isinstance(plan[3], tuple) else plan[3]
+        )
+
+        # Drop every source before inserting any destination: in a swap the
+        # destination of one rename is the source of another, so inserting as
+        # we go would overwrite the other's mapping.
+        for _, stored, _, _ in plans:
+            self._validation_cache.clear()
+            del self._map[stored]
+            dict.__delitem__(self, stored.key)
+
+        for old, stored, new_key, idx in plans:
+            indices = idx if isinstance(idx, tuple) else (idx,)
+            # _table_keys mirrors the body to order super-table merges; every
+            # occurrence of a renamed key (a split table has one per fragment)
+            # has to point at the new key instead of a dangling one.
+            replaced_ids = {
+                id(self._body[i][0]) for i in indices if self._body[i][0] is not None
+            }
+            for i in indices:
+                body_key, value = self._body[i]
+                assert body_key is not None
+                self._body[i] = (new_key, value)
+                # A table's header is rendered from its display name, not from
+                # the key, so rename the header text too -- for however many
+                # places the table was defined in.
+                _rename_value_display_names(value, old, new_key.key)
+
+            self._map[new_key] = idx
+            first = self._body[indices[0]][1]
+            dict.__setitem__(self, new_key.key, first.value)
+
+            for i, table_key in enumerate(self._table_keys):
+                if id(table_key) in replaced_ids or table_key is stored:
+                    self._table_keys[i] = new_key
+
+        self._out_of_order_keys = {
+            k for k, v in self._map.items() if isinstance(v, tuple)
+        }
+        self._rebuild_dict_view()
+        return self
+
+    def _rebuild_dict_view(self) -> None:
+        """Restore the wrapped dict's key order to the body's order.
+
+        Renaming deletes and re-inserts a key, which would otherwise leave it
+        last in ``dict`` iteration even though the document renders it in
+        place. Subclasses of the container rely on the body for ordering.
+        """
+        values = dict(dict.items(self))
+        dict.clear(self)
+        seen: set[str] = set()
+        for key, _ in self._body:
+            if key is None or key.key in seen:
+                continue
+            seen.add(key.key)
+            if key.key in values:
+                dict.__setitem__(self, key.key, values[key.key])
+        for key, value in values.items():
+            if key not in seen:
+                dict.__setitem__(self, key, value)
 
     def _insert_at(self, idx: int, key: Key | str, item: Any) -> Container:
         if idx > len(self._body) - 1:
@@ -1315,10 +1424,117 @@ class OutOfOrderTableProxy(_CustomDict):  # type: ignore[type-arg]
     def __len__(self) -> int:
         return dict.__len__(self)
 
+    def rename_keys(self, mapping: Mapping[str, str]) -> OutOfOrderTableProxy:
+        """Rename keys of this (split) table, all at once.
+
+        See :meth:`Container.rename_keys`: names are literal, swaps and chains
+        apply to the original values, and the call is atomic. All parts of the
+        table are updated, so every header that spells a renamed key follows.
+
+        Each part is a table of its own, so the rename is applied to all of
+        them; the proxy's merged view is then rebuilt from the updated parts.
+        """
+        raw: Mapping[Any, Any] = mapping
+        for old, new in raw.items():
+            if not isinstance(old, str) or not isinstance(new, str):
+                raise TypeError("rename_keys() expects a mapping of str to str")
+
+        changed = {old: new for old, new in mapping.items() if old != new}
+        if not changed:
+            return self
+        for old in changed:
+            if SingleKey(old) not in self._tables_map:
+                raise NonExistentKey(old)
+
+        seen: dict[str, str] = {}
+        for old, new in changed.items():
+            if new in seen or (new not in changed and new in self._tables_map):
+                raise KeyAlreadyPresent(new)
+            seen[new] = old
+
+        self._container._validate_out_of_order_table()
+        # Validate every part before mutating any of them, so a failure leaves
+        # the document untouched.
+        per_table: list[tuple[Table, dict[str, str]]] = []
+        for table in self._tables:
+            # Only the keys this part actually owns; the others would be
+            # reported missing.
+            owned = {
+                old: new
+                for old, new in changed.items()
+                if SingleKey(old) in table.value._map
+            }
+            if owned:
+                per_table.append((table, owned))
+
+        for table, owned in per_table:
+            _check_rename_keys(table.value, owned)
+
+        for table, owned in per_table:
+            table.rename_keys(owned)
+
+        self._rebuild_from_parts()
+        return self
+
+    def _rebuild_from_parts(self) -> None:
+        """Refresh the merged view from the tables of every part."""
+        self._internal_container = Container(True)
+        self._tables_map = {}
+        for key in list(dict.keys(self)):
+            dict.__delitem__(self, key)
+
+        for table_idx, table in enumerate(self._tables):
+            for k, v in table.value.body:
+                if k is None:
+                    continue
+                merged = self._merge_aot_fragment(k, v)
+                if merged is None:
+                    self._internal_container._raw_append(k, v)
+                else:
+                    v = merged
+                key_indices = self._tables_map.setdefault(k, [])
+                if table_idx not in key_indices:
+                    key_indices.append(table_idx)
+                dict.__setitem__(self, k.key, v)
+
+        self._internal_container._validate_out_of_order_table()
+
     def setdefault(self, key: Key | str, default: Any = None) -> Any:
         if key not in self:
             self[key] = default
         return self[key]
+
+
+def _rename_plan(
+    container: Container, changed: dict[str, str]
+) -> list[tuple[str, Key, Key, int | tuple[int, ...]]]:
+    """Validate a rename and return what each edited key will become.
+
+    Nothing is mutated. Raises if a source is missing, a destination is still
+    occupied by a key staying put, or two sources ask for the same destination.
+    """
+    seen: dict[str, str] = {}
+    for old, new in changed.items():
+        if SingleKey(old) not in container._map:
+            raise NonExistentKey(old)
+        if new in seen:
+            raise KeyAlreadyPresent(new)
+        if new not in changed and SingleKey(new) in container._map:
+            raise KeyAlreadyPresent(new)
+        seen[new] = old
+
+    plans: list[tuple[str, Key, Key, int | tuple[int, ...]]] = []
+    for old, new in changed.items():
+        idx = container._map[SingleKey(old)]
+        stored = container._body[idx[0] if isinstance(idx, tuple) else idx][0]
+        assert stored is not None
+        plans.append((old, stored, _renamed_key(stored, new), idx))
+    return plans
+
+
+def _check_rename_keys(container: Container, changed: dict[str, str]) -> None:
+    """Run :func:`_rename_plan` discarding its result."""
+    _rename_plan(container, changed)
 
 
 def ends_with_whitespace(it: Any) -> bool:

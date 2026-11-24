@@ -11,6 +11,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import date
 from datetime import datetime
@@ -264,6 +265,147 @@ def item(value: Any, _parent: Item | None = None, _sort_keys: bool = False) -> I
                 return rv
 
     raise ConvertError(f"Unable to convert an object of {type(value)} to a TOML item")
+
+
+def _rendered_key_name(key: SingleKey) -> str:
+    """The text a single key renders as before its ``sep``."""
+    return key._original
+
+
+def _key_original(key: str, key_type: KeyType) -> str:
+    """The quoted or bare text of ``key`` in a TOML document."""
+    # escape_string() defaults to the basic-string escape set, which is also
+    # the one TOML applies to quoted keys.
+    key_str = escape_string(key) if key_type is KeyType.Basic else key
+    return f"{key_type.value}{key_str}{key_type.value}"
+
+
+def _key_type_for(new: str, key_type: KeyType) -> KeyType:
+    """The spelling to use for ``new``, matching ``key_type`` where possible."""
+    if key_type is KeyType.Bare and not _BARE_KEY_CHARS.issuperset(new):
+        return KeyType.Basic
+    if key_type is KeyType.Literal and any(
+        c in new for c in StringType.SLL.invalid_sequences
+    ):
+        # A literal key cannot hold these; a basic key escapes them instead.
+        return KeyType.Basic
+    return key_type
+
+
+def _renamed_key(key: Key, new: str) -> Key:
+    """A key identical in spelling to ``key`` except for its name.
+
+    The whitespace around the old name and its ``sep`` are kept, as is its
+    dotted-key status. A multi-component key is reduced to its head, which is
+    what a container stores.
+    """
+    single = next(iter(key))
+    assert isinstance(single, SingleKey)
+    key_type = _key_type_for(new, single.t)
+    rendered = _rendered_key_name(single)
+    prefix = rendered[: len(rendered) - len(rendered.lstrip())]
+    suffix = rendered[len(rendered.rstrip()) :]
+    renamed = SingleKey(
+        new,
+        t=key_type,
+        sep=single.sep,
+        original=f"{prefix}{_key_original(new, key_type)}{suffix}",
+    )
+    renamed._dotted = single.is_dotted()
+    return renamed
+
+
+def _iter_header_parts(display_name: str) -> Iterator[tuple[int, int, str]]:
+    """Yield ``(start, end, raw)`` for every component of a header name.
+
+    ``display_name`` is the raw text between the brackets, e.g. `` a . b ``.
+    ``raw`` is the component's original spelling including quotes; the
+    offsets delimit exactly that component, so it can be replaced in place.
+    """
+    i = 0
+    n = len(display_name)
+    while i < n:
+        while i < n and (display_name[i].isspace() or display_name[i] == "."):
+            i += 1
+        if i >= n:
+            return
+        start = i
+        if display_name[i] in "\"'":
+            quote = display_name[i]
+            i += 1
+            while i < n:
+                if display_name[i] == "\\" and quote == '"':
+                    i += 2
+                    continue
+                if display_name[i] == quote:
+                    i += 1
+                    break
+                i += 1
+        else:
+            while i < n and display_name[i] not in " \t.":
+                i += 1
+        end = i
+        while i < n and display_name[i].isspace():
+            i += 1
+        yield start, end, display_name[start:end]
+
+
+def _header_part_name(raw: str) -> str:
+    """The logical name of one raw header component."""
+    if len(raw) >= 2 and raw[0] in "\"'":
+        from tomlkit.parser import Parser
+
+        return Parser(raw)._parse_simple_key().key
+    return raw
+
+
+def _header_part_like(raw: str, name: str) -> str:
+    """Spell ``name`` with the quoting style of the header component ``raw``."""
+    if len(raw) >= 2 and raw[0] in "\"'":
+        key_type = KeyType.Basic if raw[0] == '"' else KeyType.Literal
+    else:
+        key_type = KeyType.Bare
+    return _key_original(name, _key_type_for(name, key_type))
+
+
+def _rename_table_display_names(
+    table: Table, old: str, new: str, depth: int = 0
+) -> None:
+    """Rename the ``depth``-th ancestor of a table's header display name.
+
+    Depth 0 is the table itself (the last path component), 1 its parent, and
+    so on. Only headers whose component actually spells ``old`` are touched.
+    """
+    display_name = table.display_name
+    if display_name is not None:
+        parts = list(_iter_header_parts(display_name))
+        index = len(parts) - 1 - depth
+        if index >= 0:
+            start, end, raw = parts[index]
+            if _header_part_name(raw) == old:
+                table.display_name = (
+                    display_name[:start]
+                    + _header_part_like(raw, new)
+                    + display_name[end:]
+                )
+
+    for key, child in table.value.body:
+        if key is None:
+            continue
+        if isinstance(child, Table):
+            _rename_table_display_names(child, old, new, depth + 1)
+        elif isinstance(child, AoT):
+            for element in child.body:
+                _rename_table_display_names(element, old, new, depth + 1)
+
+
+def _rename_value_display_names(value: Item, old: str, new: str) -> None:
+    """Update the header display names inside a renamed key's value."""
+    if isinstance(value, Table):
+        _rename_table_display_names(value, old, new)
+    elif isinstance(value, AoT):
+        for element in value.body:
+            _rename_table_display_names(element, old, new)
 
 
 def _format_time(value: time) -> str:
@@ -1911,6 +2053,29 @@ class AbstractTable(Item, _CustomDict):  # type: ignore[type-arg]
 
         if key is not None:
             dict.__delitem__(self, key)
+
+        return self
+
+    def rename_keys(self: AT, mapping: Mapping[str, str]) -> AT:
+        """Rename keys of this table, all at once.
+
+        See :meth:`tomlkit.container.Container.rename_keys`: names are literal
+        (a dot is an ordinary character), swaps and chains apply to the
+        original values, and the call is atomic -- if any old name is missing
+        or any destination collides, nothing is changed.
+        """
+        renamed = [
+            (old, new)
+            for old, new in mapping.items()
+            if old != new and SingleKey(old) in self._value._map
+        ]
+        values = {old: dict.__getitem__(self, old) for old, _ in renamed}
+
+        self._value.rename_keys(mapping)
+
+        for old, new in renamed:
+            dict.__delitem__(self, old)
+            dict.__setitem__(self, new, values[old])
 
         return self
 
