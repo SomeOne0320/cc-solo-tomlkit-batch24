@@ -181,6 +181,7 @@ class Container(_CustomDict):  # type: ignore[type-arg]
             if isinstance(v, Table):
                 v.value.parsing(parsing)
             elif isinstance(v, AoT):
+                v.parsing(parsing)
                 for t in v.body:
                     t.value.parsing(parsing)
 

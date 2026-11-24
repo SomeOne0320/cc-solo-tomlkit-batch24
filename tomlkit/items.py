@@ -2432,11 +2432,22 @@ class AoT(Item, _CustomList):  # type: ignore[type-arg]
         self.name = name
         self._body: list[Table] = []
         self._parsed = parsed
+        # Whether the array was created by the parser. Unlike ``_parsed`` --
+        # which ``Container.parsing()`` flips once parsing finishes -- this
+        # keeps its constructor value, so trivia fix-ups on insertion only
+        # happen for programmatically built arrays, never for parsed ones.
+        self._born_parsed = parsed
 
         super().__init__(Trivia(trail=""))
 
         for table in body:
-            self.append(table)
+            table = item(table, _parent=self)
+            if not isinstance(table, Table):
+                raise ValueError(f"Unsupported AoT body type: {type(table)}")
+            # The initial body is stored as given: re-rooting sub-tables and
+            # fixing up trivia only happens for tables inserted afterwards.
+            self._body.append(table)
+            list.append(self, table)
 
     def unwrap(self) -> list[dict[str, Any]]:
         unwrapped = []
@@ -2479,10 +2490,27 @@ class AoT(Item, _CustomList):  # type: ignore[type-arg]
                     raise ValueError(
                         f"Unsupported assignment value type: {type(table)}"
                     )
+            if not self._parsed:
+                # Re-root the sub-tables of tables moved in from another
+                # array of tables, unless each table is assigned back to
+                # its own slot (which must leave the document untouched).
+                old = self._body[key]
+                if not (
+                    len(old) == len(value) and all(o is n for o, n in zip(old, value))
+                ):
+                    for table in value:
+                        table.invalidate_display_name()
         else:
             value = item(value, _parent=self)
             if not isinstance(value, Table):
                 raise ValueError(f"Unsupported assignment value type: {type(value)}")
+            if not self._parsed:
+                try:
+                    current = self._body[key]
+                except IndexError:
+                    current = None
+                if current is not value:
+                    value.invalidate_display_name()
         self._body[key] = value
         list.__setitem__(self, key, value)
 
@@ -2494,6 +2522,11 @@ class AoT(Item, _CustomList):  # type: ignore[type-arg]
         value = item(value, _parent=self)
         if not isinstance(value, Table):
             raise ValueError(f"Unsupported insert value type: {type(value)}")
+        if not self._parsed:
+            # The table may have been parsed as part of another array of
+            # tables, in which case its sub-tables still render with the
+            # old path; re-root them onto this array.
+            value.invalidate_display_name()
         length = len(self)
         if index < 0:
             index += length
@@ -2512,13 +2545,23 @@ class AoT(Item, _CustomList):  # type: ignore[type-arg]
                 value.trivia.indent = m.group(1) + indent + m.group(2)
         prev_table = self._body[index - 1] if 0 < index and length else None
         next_table = self._body[index + 1] if index < length - 1 else None
-        if not self._parsed:
+        if not self._born_parsed:
             if prev_table and "\n" not in value.trivia.indent:
                 value.trivia.indent = "\n" + value.trivia.indent
             if next_table and "\n" not in next_table.trivia.indent:
                 next_table.trivia.indent = "\n" + next_table.trivia.indent
         self._body.insert(index, value)
         list.insert(self, index, value)
+
+    def parsing(self, parsing: bool) -> None:
+        """Mark the array as being parsed or not.
+
+        Mirrors :meth:`tomlkit.container.Container.parsing`: while parsing,
+        sub-table display names are assigned by the parser and must be kept;
+        afterwards, inserting or assigning a table re-roots its sub-tables
+        onto this array.
+        """
+        self._parsed = parsing
 
     def invalidate_display_name(self) -> None:
         """Call ``invalidate_display_name`` on the contained tables"""

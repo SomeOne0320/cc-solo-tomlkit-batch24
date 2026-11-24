@@ -2004,3 +2004,143 @@ def test_emptied_array_of_tables_is_relative_to_the_nearest_header() -> None:
     doc["t"]["u"]["a"].pop()
 
     assert doc.as_string() == "[t]\nu.a = []\n"
+
+
+SOURCE_GROUP = """\
+# Source deployment group
+[[source.tasks]]
+name = "build"  # task name
+
+[source.tasks.env]
+CC = "gcc"
+
+[source.tasks.env.cache]
+dir = "/var/cache/source"
+
+[[source.tasks.steps]]
+run = "make"
+
+[[source.tasks.steps]]
+run = "make install"
+
+[source.tasks.steps.hooks]
+post = "echo done"
+"""
+
+TARGET_GROUP = """\
+# Target deployment group
+[[target.tasks]]
+name = "lint"
+
+[target.tasks.env]
+CC = "clang"
+
+[target.tasks.env.cache]
+dir = "/var/cache/target"
+
+[[target.tasks.steps]]
+run = "flake8"
+"""
+
+MOVED_TASK = """\
+[[target.tasks]]
+name = "build"  # task name
+
+[target.tasks.env]
+CC = "gcc"
+
+[target.tasks.env.cache]
+dir = "/var/cache/source"
+
+[[target.tasks.steps]]
+run = "make"
+
+[[target.tasks.steps]]
+run = "make install"
+
+[target.tasks.steps.hooks]
+post = "echo done"
+"""
+
+
+def test_append_aot_element_from_other_group_re_roots_subtables() -> None:
+    source = parse(SOURCE_GROUP)
+    target = parse(TARGET_GROUP)
+
+    target["target"]["tasks"].append(source["source"]["tasks"][0])
+
+    # Sub-tables, deeper sub-sections and nested arrays of tables of the
+    # moved entry all render under the target group.
+    assert target.as_string() == TARGET_GROUP + MOVED_TASK
+    # The source document is not affected by the move.
+    assert source.as_string() == SOURCE_GROUP
+    # The written file parses back into the right groups and tasks.
+    data = parse(target.as_string())
+    assert "source" not in data
+    assert data["target"]["tasks"][1]["env"]["cache"]["dir"] == "/var/cache/source"
+    assert data["target"]["tasks"][1]["steps"][1]["hooks"]["post"] == "echo done"
+
+
+def test_replace_aot_element_with_element_from_other_group() -> None:
+    source = parse(SOURCE_GROUP)
+    target = parse(TARGET_GROUP)
+
+    target["target"]["tasks"][0] = source["source"]["tasks"][0]
+
+    assert target.as_string() == "# Target deployment group\n" + MOVED_TASK
+    assert source.as_string() == SOURCE_GROUP
+    data = parse(target.as_string())
+    assert "source" not in data
+    assert len(data["target"]["tasks"]) == 1
+    assert data["target"]["tasks"][0]["env"]["CC"] == "gcc"
+
+
+def test_slice_assign_aot_element_from_other_group() -> None:
+    source = parse(SOURCE_GROUP)
+    target = parse(TARGET_GROUP)
+
+    target["target"]["tasks"][0:1] = [source["source"]["tasks"][0]]
+
+    assert target.as_string() == "# Target deployment group\n" + MOVED_TASK
+    assert source.as_string() == SOURCE_GROUP
+    data = parse(target.as_string())
+    assert "source" not in data
+    assert len(data["target"]["tasks"]) == 1
+    assert data["target"]["tasks"][0]["steps"][0]["run"] == "make"
+
+
+def test_aot_element_assigned_to_itself_preserves_document() -> None:
+    doc = parse(TARGET_GROUP)
+    doc["target"]["tasks"][0] = doc["target"]["tasks"][0]
+    assert doc.as_string() == TARGET_GROUP
+
+    doc = parse(TARGET_GROUP)
+    doc["target"]["tasks"][0:1] = doc["target"]["tasks"][0:1]
+    assert doc.as_string() == TARGET_GROUP
+
+    doc = parse(TARGET_GROUP)
+    doc["target"]["tasks"][:] = doc["target"]["tasks"][:]
+    assert doc.as_string() == TARGET_GROUP
+
+
+def test_moved_aot_element_round_trips_through_stdlib() -> None:
+    # The re-rooted document must be read back correctly by a strict TOML
+    # parser: sub-settings belong to the target task, not to a phantom
+    # source group.
+    tomllib = pytest.importorskip("tomllib")
+
+    source = parse(SOURCE_GROUP)
+    target = parse(TARGET_GROUP)
+    target["target"]["tasks"].append(source["source"]["tasks"][0])
+
+    data = tomllib.loads(target.as_string())
+    assert set(data) == {"target"}
+    moved = data["target"]["tasks"][1]
+    assert moved == {
+        "name": "build",
+        "env": {"CC": "gcc", "cache": {"dir": "/var/cache/source"}},
+        "steps": [
+            {"run": "make"},
+            {"run": "make install", "hooks": {"post": "echo done"}},
+        ],
+    }

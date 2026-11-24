@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fix moving an element between arrays of tables (via `append()`, `insert()`, item or slice assignment) leaving its sub-tables and nested arrays of tables rendering with the old path, e.g. appending an entry of `[[source.tasks]]` to `[[target.tasks]]` wrote `[source.tasks.env]` into the target file, which other parsers read back as a separate `source` group or reject. The moved entry's sub-sections are now re-rooted onto the target array, while entries assigned back to their own slot leave the document untouched.
 - Allow `Table.setdefault()` and `InlineTable.setdefault()` to retrieve existing values without supplying a default, matching document and mapping behavior.
 
 - Fix `item()` and `dumps()` writing a `datetime` whose UTC offset is not a whole number of minutes (e.g. the historical LMT offsets `zoneinfo` gives, such as `-00:44:30`) as invalid TOML like `1900-01-01T12:00:00Z:30`, which no parser accepts. Such a value is now written as the same instant in UTC; this also covers `DateTime.replace()` and `astimezone()`.
